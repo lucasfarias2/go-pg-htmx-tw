@@ -1,13 +1,19 @@
 package main
 
 import (
-	"github.com/go-chi/chi/v5"
-	"github.com/joho/godotenv"
-	"go-pg-htmx-tw/db"
-	"html/template"
 	"log"
+	"go-pg-htmx-tw/db"
 	"net/http"
 	"strings"
+)
+
+import (
+	"github.com/fsnotify/fsnotify"
+	"github.com/go-chi/chi"
+	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
+	"html/template"
+	"go-pg-htmx-tw/routes"
 )
 
 func main() {
@@ -21,13 +27,23 @@ func main() {
 
 	fileServer(r, "/static", http.Dir("static"))
 
+	r.HandleFunc("/ws", handleConnections)
+
+	r.Mount("/api", routes.ApiRouter())
+	//r.Mount("/", routes.WebRouter())
+
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-		tmpl, err := template.ParseFiles("templates/index.html")
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		tmpl.Execute(w, nil)
+		renderTemplate(w, r, "index", map[string]interface{}{
+			"Title":   "Packlify",
+			"Pattern": r.URL.Path,
+		})
+	})
+
+	r.Get("/projects", func(w http.ResponseWriter, r *http.Request) {
+		renderTemplate(w, r, "projects", map[string]interface{}{
+			"Title":   "Packlify - Projects",
+			"Pattern": r.URL.Path,
+		})
 	})
 
 	log.Println("Running on localhost:8080")
@@ -50,4 +66,71 @@ func fileServer(r chi.Router, path string, root http.FileSystem) {
 	r.Get(path, func(w http.ResponseWriter, r *http.Request) {
 		fs.ServeHTTP(w, r)
 	})
+}
+
+func renderTemplate(w http.ResponseWriter, r *http.Request, name string, data map[string]interface{}) {
+	tmpl, err := template.ParseFiles("templates/layout.html", "templates/"+name+".html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	err = tmpl.ExecuteTemplate(w, "layout.html", data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
+func handleConnections(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer ws.Close()
+
+	// Watch for changes in the templates folder
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer watcher.Close()
+
+	go func() {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				if event.Op&fsnotify.Write == fsnotify.Write {
+					log.Println("modified file:", event.Name)
+					ws.WriteMessage(websocket.TextMessage, []byte("reload"))
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				log.Println("error:", err)
+			}
+		}
+	}()
+
+	err = watcher.Add("./templates")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Keep the connection open
+	for {
+		if _, _, err := ws.NextReader(); err != nil {
+			ws.Close()
+			break
+		}
+	}
 }

@@ -21,3 +21,4 @@ tmp
 .idea
 .env
 .DS_Store
+go-pg-htmx-tw
